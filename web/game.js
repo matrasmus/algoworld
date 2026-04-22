@@ -649,11 +649,9 @@ class Game {
     if (this.tutorialStep === 1 && this.liveNet) {
       const ar = this.previewArea();
       const degs = [];
-      for (let i = 0; i < this.liveNet.n; i++) degs.push(this.liveNet.getNodeRadius(i, this.beta));
-      const visualDegs = [];
-      for (let i = 0; i < this.liveNet.n; i++) visualDegs.push(this.liveNet.degreesLowBeta[i] + (this.liveNet.degreesHighBeta[i] - this.liveNet.degreesLowBeta[i]) * this.beta);
-      const superstars = visualDegs.filter(d => d > 20).length;
-      const maxDeg = Math.round(Math.max(...visualDegs));
+      for (let i = 0; i < this.liveNet.n; i++) degs.push(this.liveNet.getActiveDegree(i));
+      const superstars = degs.filter(d => d > 20).length;
+      const maxDeg = Math.max(...degs);
       const statY = ar.y + ar.h - sp(60);
       ctx.fillStyle = "rgb(18,18,24)";
       roundRect(ar.x + sp(8), statY, sp(220), sp(55), sp(4));
@@ -872,7 +870,7 @@ class Game {
     for (let i = 0; i < net.n; i++) {
       const px = ox + net.posX[i] * ratio;
       const py = oy + net.posY[i] * ratio;
-      const r = Math.max(1, Math.round(net.getNodeRadius(i, this.beta) * s));
+      const r = Math.max(1, Math.round(net.getNodeRadius(i) * s));
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
       ctx.fillStyle = TOPICS[net.topic[i]].color;

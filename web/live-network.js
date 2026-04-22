@@ -25,18 +25,27 @@ class LiveNetwork {
       this.controversy.push(rng.betavariate(CONFIG.CONTROVERSY_BETA_A, CONFIG.CONTROVERSY_BETA_B));
     }
 
-    // Generate edge pool with maximum connectivity (mu_max, no censorship)
-    // Each edge gets thresholds determining when it's active
+    // Per-node hub score: how "hub-like" is this node?
+    // Drawn from power-law at tau1_min (most hub-heavy extreme)
+    this.hubScore = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      this.hubScore[i] = this._powerlawSample(rng, CONFIG.TAU1_MIN, 3, 50);
+    }
+    // Normalize to [0, 1]
+    const maxHub = Math.max(...this.hubScore);
+    for (let i = 0; i < n; i++) {
+      this.hubScore[i] /= maxHub;
+    }
+
+    // Generate edge pool with maximum connectivity
     this.edgePool = [];
     this._generateEdgePool(rng, sizes, kComm);
 
-    // Compute controversy boost from bridge fraction in the full graph
+    // Compute controversy boost from bridge fraction
     this._boostControversy(rng);
 
-    // Node degrees at two extremes of beta (for visual interpolation)
-    this.degreesLowBeta = new Float64Array(n);  // tau1_min = 2.1 (heavy hubs)
-    this.degreesHighBeta = new Float64Array(n);  // tau1_max = 3.5 (uniform)
-    this._precomputeDegreeProfiles(rng);
+    // Assign beta thresholds to edges based on hub scores
+    this._assignBetaThresholds(rng);
 
     // Active state
     this.activeAdj = [];
@@ -46,21 +55,19 @@ class LiveNetwork {
     // Layout
     this.posX = new Float64Array(n);
     this.posY = new Float64Array(n);
+    this.velX = new Float64Array(n);
+    this.velY = new Float64Array(n);
     this._initPositions(rng);
     this.k = Math.sqrt(width * height / Math.max(1, n)) * 0.9;
-    this.tMax = Math.min(width, height) / 16;
-    this.tMin = 0.3;
-    this.layoutIter = 0;
-    this.layoutTotal = 600;
 
     // Current knob values (for change detection)
     this._lastAlpha = -1;
+    this._lastBeta = -1;
     this._lastDelta = -1;
 
-    // Initial edge computation
-    this.updateEdges(0, 0);
-    // Pre-settle layout
-    for (let i = 0; i < 200; i++) this.layoutStep();
+    // Initial edge computation and settle
+    this.updateEdges(0, 0, 0);
+    for (let i = 0; i < 250; i++) this.layoutStep(true);
     this._fitToCanvas();
   }
 
@@ -87,7 +94,6 @@ class LiveNetwork {
     const community = this.community;
     const targetEdges = Math.floor(n * 9 / 2);
 
-    // Build weighted pools
     const byComm = {};
     const globalPool = [];
     for (let i = 0; i < n; i++) {
@@ -106,12 +112,13 @@ class LiveNetwork {
       this.edgePool.push({
         u, v, isCross,
         alphaRank: isCross ? rng.random() : -1,
-        // deltaThreshold computed after controversy boost
+        betaRank: 0,
+        controversyMax: 0,
       });
       return true;
     };
 
-    // Within-community edges (~60% of total)
+    // Within-community edges (~60%)
     const withinTarget = Math.floor(targetEdges * 0.6);
     let placed = 0, attempts = 0;
     while (placed < withinTarget && attempts < withinTarget * 20) {
@@ -122,7 +129,7 @@ class LiveNetwork {
       if (addEdge(rng.choice(pool), rng.choice(pool), false)) placed++;
     }
 
-    // Cross-community edges (~40% of total, maximum mixing)
+    // Cross-community edges (~40%)
     const crossTarget = targetEdges - withinTarget;
     placed = 0; attempts = 0;
     while (placed < crossTarget && attempts < crossTarget * 20) {
@@ -150,7 +157,6 @@ class LiveNetwork {
   }
 
   _boostControversy(rng) {
-    // Boost controversy for nodes with many cross-community edges
     const n = this.n;
     const crossCount = new Int32Array(n);
     const totalCount = new Int32Array(n);
@@ -167,33 +173,21 @@ class LiveNetwork {
       this.controversy[i] = Math.min(1.0,
         this.controversy[i] + CONFIG.BRIDGE_CONTROVERSY_BOOST * bridgeFrac);
     }
-
-    // Now assign delta thresholds to edges
     for (const e of this.edgePool) {
       if (e.isCross) {
-        // Edge is censored when max controversy of endpoints > tau_cens
         e.controversyMax = Math.max(this.controversy[e.u], this.controversy[e.v]);
-      } else {
-        e.controversyMax = 0; // within-community edges never censored
       }
     }
   }
 
-  _precomputeDegreeProfiles(rng) {
-    // Simulate what degrees would look like at beta=0 vs beta=1
-    // by drawing from power-law at each extreme
-    const n = this.n;
-    for (let i = 0; i < n; i++) {
-      this.degreesLowBeta[i] = this._powerlawSample(rng, CONFIG.TAU1_MIN, 3, 40);
-      this.degreesHighBeta[i] = this._powerlawSample(rng, CONFIG.TAU1_MAX, 3, 40);
-    }
-    // Normalize both to similar mean
-    const meanLow = this.degreesLowBeta.reduce((a, b) => a + b) / n;
-    const meanHigh = this.degreesHighBeta.reduce((a, b) => a + b) / n;
-    const targetMean = 10;
-    for (let i = 0; i < n; i++) {
-      this.degreesLowBeta[i] = Math.max(2, this.degreesLowBeta[i] * targetMean / meanLow);
-      this.degreesHighBeta[i] = Math.max(2, this.degreesHighBeta[i] * targetMean / meanHigh);
+  _assignBetaThresholds(rng) {
+    // Beta controls degree distribution: low beta = hubs dominate, high beta = equal
+    // Each edge gets a betaRank based on how "hub-like" its endpoints are
+    // At high beta, edges from hubs are pruned to equalize degrees
+    for (const e of this.edgePool) {
+      const hubMax = Math.max(this.hubScore[e.u], this.hubScore[e.v]);
+      // Mix hub score with randomness so pruning isn't perfectly deterministic
+      e.betaRank = hubMax * 0.7 + rng.random() * 0.3;
     }
   }
 
@@ -220,23 +214,25 @@ class LiveNetwork {
 
   // --- Continuous edge updates ---
 
-  updateEdges(alpha, delta) {
-    // Determine which edges are active based on current knob values
-    const muRatio = CONFIG.MU_MIN / CONFIG.MU_MAX; // ~0.125
+  updateEdges(alpha, beta, delta) {
+    const muRatio = CONFIG.MU_MIN / CONFIG.MU_MAX;
     const crossThreshold = 1.0 - alpha * (1.0 - muRatio);
     const tauCens = CONFIG.CENSOR_MAX - delta * (CONFIG.CENSOR_MAX - CONFIG.CENSOR_MIN);
+    // Beta: at beta=0, all edges survive. At beta=1, edges with high betaRank are pruned.
+    // Threshold ramps from 1.0 (all pass) to ~0.35 (only low-hub edges pass)
+    const betaThreshold = 1.0 - beta * 0.65;
 
-    // Clear adjacency
     for (let i = 0; i < this.n; i++) this.activeAdj[i] = [];
     this.activeEdgeIndices = [];
 
     for (let ei = 0; ei < this.edgePool.length; ei++) {
       const e = this.edgePool[ei];
 
+      // Beta filter: prune hub-heavy edges as beta increases
+      if (e.betaRank >= betaThreshold) continue;
+
       if (e.isCross) {
-        // Alpha filter: edge visible when its rank < threshold
         if (e.alphaRank >= crossThreshold) continue;
-        // Delta filter: censorship
         if (e.controversyMax > tauCens) continue;
       }
 
@@ -246,21 +242,23 @@ class LiveNetwork {
     }
 
     this._lastAlpha = alpha;
+    this._lastBeta = beta;
     this._lastDelta = delta;
   }
 
-  // --- Layout (continuous FR) ---
+  // --- Layout ---
 
-  layoutStep() {
+  layoutStep(settling) {
     const n = this.n;
     const k = this.k;
     const cutoff = k * 6;
     const k2 = k * k;
     const px = this.posX, py = this.posY;
+    const vx = this.velX, vy = this.velY;
 
-    const prog = Math.min(1.0, this.layoutIter / this.layoutTotal);
-    const temp = this.tMax * (1 - prog) + this.tMin * prog;
-    this.layoutIter++;
+    // Fixed low temperature for continuous mode (higher during initial settle)
+    const temp = settling ? 3.0 : 1.2;
+    const damping = settling ? 0.85 : 0.6;
 
     const dispX = new Float64Array(n);
     const dispY = new Float64Array(n);
@@ -280,7 +278,7 @@ class LiveNetwork {
       }
     }
 
-    // Attraction along ACTIVE edges only
+    // Attraction along active edges
     for (const ei of this.activeEdgeIndices) {
       const e = this.edgePool[ei];
       const dx = px[e.v] - px[e.u];
@@ -293,20 +291,34 @@ class LiveNetwork {
       dispX[e.v] -= fx; dispY[e.v] -= fy;
     }
 
-    // Gravity
+    // Gravity toward center
     const gcx = this.width * 0.5;
     const gcy = this.height * 0.5;
     for (let i = 0; i < n; i++) {
-      dispX[i] += (gcx - px[i]) * 0.005;
-      dispY[i] += (gcy - py[i]) * 0.005;
+      dispX[i] += (gcx - px[i]) * 0.008;
+      dispY[i] += (gcy - py[i]) * 0.008;
     }
 
-    // Cap by temperature
+    // Soft boundary forces — push nodes back into canvas
+    const pad = 20;
+    const bx0 = pad, bx1 = this.width - pad;
+    const by0 = pad, by1 = this.height - pad;
+    const boundaryForce = 2.0;
+    for (let i = 0; i < n; i++) {
+      if (px[i] < bx0) dispX[i] += (bx0 - px[i]) * boundaryForce;
+      if (px[i] > bx1) dispX[i] += (bx1 - px[i]) * boundaryForce;
+      if (py[i] < by0) dispY[i] += (by0 - py[i]) * boundaryForce;
+      if (py[i] > by1) dispY[i] += (by1 - py[i]) * boundaryForce;
+    }
+
+    // Velocity-based update with damping (prevents vibration)
     for (let i = 0; i < n; i++) {
       const dmag = Math.sqrt(dispX[i] * dispX[i] + dispY[i] * dispY[i]) + 1e-9;
       const cap = Math.min(dmag, temp) / dmag;
-      px[i] += dispX[i] * cap;
-      py[i] += dispY[i] * cap;
+      vx[i] = (vx[i] + dispX[i] * cap) * damping;
+      vy[i] = (vy[i] + dispY[i] * cap) * damping;
+      px[i] += vx[i];
+      py[i] += vy[i];
     }
   }
 
@@ -329,34 +341,33 @@ class LiveNetwork {
       px[i] = (px[i] - xmin) * scale + pad + (tw - xspan * scale) * 0.5;
       py[i] = (py[i] - ymin) * scale + pad + (th - yspan * scale) * 0.5;
     }
+    // Zero velocities after fit
+    this.velX.fill(0);
+    this.velY.fill(0);
   }
 
   // --- Per-frame update ---
 
   update(alpha, beta, delta, dt) {
-    // Update edges if alpha or delta changed
     const alphaChanged = Math.abs(alpha - this._lastAlpha) > 0.001;
+    const betaChanged = Math.abs(beta - this._lastBeta) > 0.001;
     const deltaChanged = Math.abs(delta - this._lastDelta) > 0.001;
-    if (alphaChanged || deltaChanged) {
-      this.updateEdges(alpha, delta);
-      // Reset layout temperature so it can re-settle
-      this.layoutIter = Math.max(0, this.layoutIter - 80);
+    if (alphaChanged || betaChanged || deltaChanged) {
+      this.updateEdges(alpha, beta, delta);
     }
 
-    // Always run a few layout steps for smooth animation
-    const steps = this.layoutIter < this.layoutTotal ? 3 : 1;
-    for (let i = 0; i < steps; i++) {
-      this.layoutStep();
+    // Run layout steps — always active for smooth response
+    for (let i = 0; i < 2; i++) {
+      this.layoutStep(false);
     }
   }
 
   // --- Rendering data ---
 
   getNodeRadius(i, beta) {
-    const degLow = this.degreesLowBeta[i];
-    const degHigh = this.degreesHighBeta[i];
-    const deg = degLow + (degHigh - degLow) * beta;
-    return nodeRadius(deg, 30, 1.5, 12);
+    // Node radius based on actual active degree
+    const deg = this.activeAdj[i].length;
+    return nodeRadius(deg, 20, 1.5, 12);
   }
 
   getActiveDegree(i) {
