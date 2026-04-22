@@ -206,14 +206,8 @@ class Game {
     this.dragging = false;
     this.dragLast = [0, 0];
 
-    this.previewGraph = null;
-    this.previewState = null;
-    this.previewRadii = [];
-    this.previewDegs = [];
-    this.knobsDirtySince = 0;
-    this.previewParams = null;
+    this.liveNet = null;
     this.nowMs = 0;
-    this._prevKnobs = [this.alpha, this.beta, this.delta];
 
     this.showboard = loadShowboard();
     this.playerName = "";
@@ -385,8 +379,8 @@ class Game {
     this.alpha = 0;
     this.beta = 0;
     this.delta = 0;
-    this._prevKnobs = [this.alpha, this.beta, this.delta];
-    this.regenPreview();
+    this.liveNet = null;
+    this.ensureLiveNet();
   }
 
   advanceKnobTutorial() {
@@ -398,14 +392,11 @@ class Game {
       this.beta = 0.5;
       this.delta = 0.5;
       this.state = "design";
-      this._prevKnobs = [this.alpha, this.beta, this.delta];
-      this.regenPreview();
     } else {
       this.tutorialPhase = "animate";
       this.tutorialAnimT = 0;
       const nextAttr = TUTORIAL_STEPS[this.tutorialStep].knob;
       this[nextAttr] = 0;
-      this._prevKnobs = [this.alpha, this.beta, this.delta];
     }
   }
 
@@ -476,35 +467,12 @@ class Game {
     }
   }
 
-  // --- Preview ---
-  regenPreview() {
-    const a = this.alpha, b = this.beta, d = this.delta;
-    const saved = {
-      N: CONFIG.N, AVG_DEGREE: CONFIG.AVG_DEGREE, MAX_DEGREE: CONFIG.MAX_DEGREE,
-      MIN_COMMUNITY_SIZE: CONFIG.MIN_COMMUNITY_SIZE, MAX_COMMUNITY_SIZE: CONFIG.MAX_COMMUNITY_SIZE,
-    };
-    CONFIG.N = 120;
-    CONFIG.AVG_DEGREE = 9;
-    CONFIG.MAX_DEGREE = Math.floor(12 + 68 * (1 - b));
-    CONFIG.MIN_COMMUNITY_SIZE = 20;
-    CONFIG.MAX_COMMUNITY_SIZE = 50;
-
-    const g = Network.generate(a, b, d, this.rng.randInt(0, 1 << 30));
-
-    Object.assign(CONFIG, saved);
-
-    this.previewGraph = g;
-    const ar = this.previewArea();
-    const st = Layout.createState(g, ar.w, ar.h, 0);
-    for (let i = 0; i < 300; i++) Layout.step(st, 300);
-    Layout.fitToCanvas(st);
-    g.pos = [];
-    for (let i = 0; i < g.n; i++) g.pos.push([st.posX[i], st.posY[i]]);
-    this.previewState = st;
-    const degs = g.adj.map(a => a.length);
-    this.previewRadii = degs.map(d => nodeRadius(d, 30, 1.5, 12));
-    this.previewDegs = degs;
-    this.previewParams = [a, b, d];
+  // --- Live Preview ---
+  ensureLiveNet() {
+    if (!this.liveNet) {
+      const ar = this.previewArea();
+      this.liveNet = new LiveNetwork(120, ar.w, ar.h, this.rng.randInt(0, 1 << 30));
+    }
   }
 
   previewArea() {
@@ -513,23 +481,6 @@ class Game {
     const pw = W - px - sp(40);
     const ph = H - py - sp(60);
     return { x: px, y: py, w: pw, h: ph };
-  }
-
-  maybeRegenPreview() {
-    const knobs = [this.alpha, this.beta, this.delta];
-    const prev = this._prevKnobs;
-    if (knobs[0] !== prev[0] || knobs[1] !== prev[1] || knobs[2] !== prev[2]) {
-      this._prevKnobs = [...knobs];
-      this.knobsDirtySince = this.nowMs;
-      return;
-    }
-    if (this.knobsDirtySince && this.nowMs - this.knobsDirtySince > 150) {
-      if (!this.previewParams || this.previewParams[0] !== knobs[0] ||
-          this.previewParams[1] !== knobs[1] || this.previewParams[2] !== knobs[2]) {
-        this.regenPreview();
-      }
-      this.knobsDirtySince = 0;
-    }
   }
 
   // --- Knob input ---
@@ -565,10 +516,10 @@ class Game {
       } else {
         this.handleTutorialKnob(dt);
       }
-      this.maybeRegenPreview();
+      if (this.liveNet) this.liveNet.update(this.alpha, this.beta, this.delta, dt);
     } else if (this.state === "design") {
       this.handleKnobs(dt);
-      this.maybeRegenPreview();
+      if (this.liveNet) this.liveNet.update(this.alpha, this.beta, this.delta, dt);
     } else if (this.state === "building") {
       const itersPerFrame = 6;
       for (let i = 0; i < itersPerFrame; i++) {
@@ -695,11 +646,14 @@ class Game {
 
     this.drawPreview(this.tutorialStep);
 
-    if (this.tutorialStep === 1 && this.previewDegs.length) {
+    if (this.tutorialStep === 1 && this.liveNet) {
       const ar = this.previewArea();
-      const degs = this.previewDegs;
-      const superstars = degs.filter(d => d > 20).length;
-      const maxDeg = Math.max(...degs);
+      const degs = [];
+      for (let i = 0; i < this.liveNet.n; i++) degs.push(this.liveNet.getNodeRadius(i, this.beta));
+      const visualDegs = [];
+      for (let i = 0; i < this.liveNet.n; i++) visualDegs.push(this.liveNet.degreesLowBeta[i] + (this.liveNet.degreesHighBeta[i] - this.liveNet.degreesLowBeta[i]) * this.beta);
+      const superstars = visualDegs.filter(d => d > 20).length;
+      const maxDeg = Math.round(Math.max(...visualDegs));
       const statY = ar.y + ar.h - sp(60);
       ctx.fillStyle = "rgb(18,18,24)";
       roundRect(ar.x + sp(8), statY, sp(220), sp(55), sp(4));
@@ -881,11 +835,11 @@ class Game {
     roundRect(ar.x, ar.y, ar.w, ar.h, sp(8));
     ctx.stroke();
 
-    if (!this.previewGraph) return;
-    const g = this.previewGraph;
-    const st = this.previewState;
+    const net = this.liveNet;
+    if (!net) return;
+
     const pw = ar.w, ph = ar.h;
-    const lw = st.width, lh = st.height;
+    const lw = net.width, lh = net.height;
     const sxR = lw ? pw / lw : 1;
     const syR = lh ? ph / lh : 1;
     const ratio = Math.min(sxR, syR);
@@ -893,40 +847,40 @@ class Game {
     const oy = ar.y + (ph - lh * ratio) * 0.5;
     const s = sc();
 
-    // Edges
-    for (let u = 0; u < g.n; u++) {
-      for (const v of g.adj[u]) {
-        if (v <= u) continue;
-        const cross = g.topic[u] !== g.topic[v];
-        let col;
-        if (tutorialStep === 0 && cross) col = CONFIG.TUTORIAL_HIGHLIGHT;
-        else if (tutorialStep === 2 && cross) col = CONFIG.TUTORIAL_CUT;
-        else col = "rgb(45,45,60)";
-        const w = this.previewDegs.length ? edgeWidth(this.previewDegs[u], this.previewDegs[v], s) : 1;
-        const x0 = ox + st.posX[u] * ratio, y0 = oy + st.posY[u] * ratio;
-        const x1 = ox + st.posX[v] * ratio, y1 = oy + st.posY[v] * ratio;
-        ctx.beginPath();
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-        ctx.strokeStyle = col;
-        ctx.lineWidth = w;
-        ctx.stroke();
-      }
+    // Draw active edges
+    for (const ei of net.activeEdgeIndices) {
+      const e = net.edgePool[ei];
+      const cross = e.isCross;
+      let col;
+      if (tutorialStep === 0 && cross) col = CONFIG.TUTORIAL_HIGHLIGHT;
+      else if (tutorialStep === 2 && cross) col = CONFIG.TUTORIAL_CUT;
+      else col = "rgb(45,45,60)";
+      const degU = net.getActiveDegree(e.u);
+      const degV = net.getActiveDegree(e.v);
+      const w = edgeWidth(degU, degV, s);
+      const x0 = ox + net.posX[e.u] * ratio, y0 = oy + net.posY[e.u] * ratio;
+      const x1 = ox + net.posX[e.v] * ratio, y1 = oy + net.posY[e.v] * ratio;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = w;
+      ctx.stroke();
     }
 
-    // Nodes
-    for (let i = 0; i < g.n; i++) {
-      const px = ox + st.posX[i] * ratio;
-      const py = oy + st.posY[i] * ratio;
-      const r = Math.max(1, Math.round(this.previewRadii[i] * s));
+    // Draw nodes
+    for (let i = 0; i < net.n; i++) {
+      const px = ox + net.posX[i] * ratio;
+      const py = oy + net.posY[i] * ratio;
+      const r = Math.max(1, Math.round(net.getNodeRadius(i, this.beta) * s));
       ctx.beginPath();
       ctx.arc(px, py, r, 0, Math.PI * 2);
-      ctx.fillStyle = TOPICS[g.topic[i]].color;
+      ctx.fillStyle = TOPICS[net.topic[i]].color;
       ctx.fill();
     }
 
     if (tutorialStep === undefined || tutorialStep === null) {
-      drawText("Live preview \u2014 network regenerates as you turn the knobs",
+      drawText("Live preview \u2014 knobs continuously reshape the network",
         "XS", CONFIG.MUTED, ar.x + sp(10), ar.y - sp(20));
     }
   }
